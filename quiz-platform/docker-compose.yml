@@ -1,0 +1,159 @@
+# docker-compose.yml
+# Orkestrasi semua container untuk Quiz Platform.
+# Diadopsi dan dikembangkan dari payment-system/docker-compose.yml
+# pada demo dist-system, dengan penambahan MySQL, RabbitMQ, 
+# Notification Service, dan Nginx sebagai load balancer.
+
+services:
+
+  # ─────────────────────────────────────────────
+  # MySQL Database
+  # Persistent storage, menggantikan in-memory dict di demo
+  # ─────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: quiz-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: password
+      MYSQL_DATABASE: quiz_platform
+    volumes:
+      # init.sql dijalankan otomatis saat container pertama kali hidup
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      # Data MySQL disimpan di volume agar tidak hilang saat container restart
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ppassword"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────────────────────────────────
+  # RabbitMQ Message Broker
+  # Digunakan untuk async notification workflow
+  # Diadopsi dari messaging/docker-compose.yml di demo
+  # ─────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: quiz-rabbitmq
+    ports:
+      - "5672:5672"    # AMQP port untuk koneksi service
+      - "15672:15672"  # Management UI (user: guest / guest)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────────────────────────────────
+  # Quiz Service — Node 1, 2, 3
+  # Ekstensi dari payment_service.py di demo:
+  # - Domain diganti: payment -> quiz/assessment
+  # - Leader Election diganti: Bully -> Ring-based
+  # - Storage diganti: in-memory dict -> MySQL
+  # - Ditambah: publish ke RabbitMQ setelah submission
+  # ─────────────────────────────────────────────
+  quiz-1:
+    build: ./quiz-service
+    container_name: quiz-node-1
+    restart: on-failure
+    environment:
+      NODE_NAME:   "quiz-1"
+      NODE_ID:     "1"
+      # Daftar semua node dalam format "hostname:node_id"
+      # Sama persis dengan pola ALL_NODES di payment_service.py demo
+      ALL_NODES:   "quiz-1:1,quiz-2:2,quiz-3:3"
+      PORT:        "5000"
+      DB_HOST:     "mysql"
+      DB_PASSWORD: "password"
+      RABBIT_HOST: "rabbitmq"
+    ports:
+      - "5001:5000"  # Akses langsung untuk debugging
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  quiz-2:
+    build: ./quiz-service
+    container_name: quiz-node-2
+    restart: on-failure
+    environment:
+      NODE_NAME:   "quiz-2"
+      NODE_ID:     "2"
+      ALL_NODES:   "quiz-1:1,quiz-2:2,quiz-3:3"
+      PORT:        "5000"
+      DB_HOST:     "mysql"
+      DB_PASSWORD: "password"
+      RABBIT_HOST: "rabbitmq"
+    ports:
+      - "5002:5000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  quiz-3:
+    build: ./quiz-service
+    container_name: quiz-node-3
+    restart: on-failure
+    environment:
+      NODE_NAME:   "quiz-3"
+      NODE_ID:     "3"
+      ALL_NODES:   "quiz-1:1,quiz-2:2,quiz-3:3"
+      PORT:        "5000"
+      DB_HOST:     "mysql"
+      DB_PASSWORD: "password"
+      RABBIT_HOST: "rabbitmq"
+    ports:
+      - "5003:5000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────────
+  # Notification Service
+  # Diadopsi dari messaging/worker.py di demo:
+  # - Consume dari queue quiz.submission.result
+  # - Simpan notifikasi ke MySQL
+  # ─────────────────────────────────────────────
+  notification-service:
+    build: ./notification-service
+    container_name: quiz-notification
+    environment:
+      RABBIT_HOST: "rabbitmq"
+      NOTIF_QUEUE: "quiz.submission.result"
+      DB_HOST:     "mysql"
+      DB_PASSWORD: "password"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  # ─────────────────────────────────────────────
+  # Nginx — Load Balancer + Static File Server
+  # Mendistribusikan request ke 3 node quiz-service (round-robin)
+  # dan melayani static file Vue frontend
+  # ─────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: quiz-nginx
+    ports:
+      - "80:80"   # Akses utama aplikasi lewat http://localhost
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+      # Hasil build Vue di-mount ke direktori static Nginx
+      - ./frontend/dist:/usr/share/nginx/html
+    depends_on:
+      - quiz-1
+      - quiz-2
+      - quiz-3
+
+volumes:
+  mysql_data:
