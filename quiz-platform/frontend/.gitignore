@@ -1,0 +1,32 @@
+# Log files
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Node.js dependencies
+node_modules/
+dist-ssr/
+
+# Build output (hasil build production)
+dist/
+
+# Environment variables (file rahasia)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Editor dan sistem operasi (file sampah lokal)
+.vscode/
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
